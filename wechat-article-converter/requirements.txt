@@ -1,0 +1,6 @@
+# Required dependencies for WeChat Article Converter
+requests>=2.31.0
+
+# Optional: For PDF conversion (choose one or both)
+weasyprint>=60.0  # Recommended for better PDF quality
+# pdfkit>=1.0.0   # Alternative (requires wkhtmltopdf installation)
