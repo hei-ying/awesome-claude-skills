@@ -1,0 +1,349 @@
+# WeChat Articles Spider
+
+## When to Use This Skill
+
+Use this skill when you need to:
+- Scrape articles from WeChat Official Accounts (公众号)
+- Extract engagement metrics (reads, likes, comments) from WeChat articles
+- Download WeChat articles as offline HTML files
+- Collect historical article data from public accounts
+- Analyze WeChat content performance
+- Archive WeChat articles for research or analysis
+
+This skill provides comprehensive documentation for the `wechatarticles` Python library, a specialized tool for interacting with WeChat's public account platform.
+
+## Quick Reference
+
+### Installation
+
+```bash
+pip install wechatarticles
+```
+
+**Requirements:** Python 3.6.2+
+
+### Basic Usage
+
+#### 1. Collect Article URLs
+
+```python
+from wechatarticles import PublicAccountsWeb
+
+# Setup credentials (see Authentication section)
+paw = PublicAccountsWeb(cookie=official_cookie, token=token)
+
+# Get articles
+articles = paw.get_urls(nickname="AccountName", biz="biz_id", begin="0", count="5")
+```
+
+#### 2. Extract Engagement Metrics
+
+```python
+from wechatarticles import ArticlesInfo
+
+ai = ArticlesInfo(appmsg_token, wechat_cookie)
+
+# Get reads and likes
+reads, likes, old_likes = ai.read_like_nums(article_url)
+
+# Get comments
+comments = ai.comments(article_url)
+```
+
+#### 3. Download as HTML
+
+```python
+from wechatarticles import Url2Html
+
+# Create directory first: account_name/imgs/
+uh = Url2Html()
+result = uh.run(article_url, mode=4)
+```
+
+#### 4. Bulk Historical Collection
+
+```python
+from wechatarticles.utils import get_history_urls
+import time, random
+
+# Get all articles (500+)
+urls = get_history_urls(biz, uin, key, offset=0)
+
+# Process with rate limiting
+for url in urls:
+    process_article(url)
+    time.sleep(random.uniform(5, 10))  # Important!
+```
+
+## Common Patterns
+
+### Complete Analysis Workflow
+
+```python
+import time
+import random
+from wechatarticles import PublicAccountsWeb, ArticlesInfo
+
+# Initialize
+paw = PublicAccountsWeb(cookie=official_cookie, token=token)
+ai = ArticlesInfo(appmsg_token, wechat_cookie)
+
+# Get articles
+articles = paw.get_urls("AccountName", biz="biz_id", begin="0", count="20")
+
+# Analyze each
+results = []
+for article in articles:
+    url = article['url']
+
+    # Get metrics
+    reads, likes, old_likes = ai.read_like_nums(url)
+    comments = ai.comments(url)
+
+    results.append({
+        'title': article['title'],
+        'reads': reads,
+        'likes': likes,
+        'comment_count': len(comments) if comments else 0
+    })
+
+    # Rate limiting (critical!)
+    time.sleep(random.uniform(5, 10))
+
+# Process results
+for r in results:
+    print(f"{r['title']}: {r['reads']} reads, {r['likes']} likes")
+```
+
+### Pagination Pattern
+
+```python
+# Fetch all articles with pagination
+all_articles = []
+begin = 0
+count = 10
+
+while True:
+    batch = paw.get_urls(nickname, biz=biz, begin=str(begin), count=str(count))
+    if not batch:
+        break
+
+    all_articles.extend(batch)
+    begin += count
+    time.sleep(2)
+```
+
+### Safe Metrics Extraction with Retry
+
+```python
+def safe_fetch_metrics(ai, url, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return ai.read_like_nums(url)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                return None, None, None
+```
+
+## Key Concepts
+
+### Authentication Methods
+
+The library requires two sets of credentials:
+
+1. **Official Account Credentials** (for `PublicAccountsWeb`)
+   - `official_cookie`: Cookie from mp.weixin.qq.com
+   - `token`: Token from official account session
+   - Used for: Web-based article collection
+
+2. **WeChat Client Credentials** (for `ArticlesInfo`)
+   - `appmsg_token`: Token from WeChat PC client
+   - `wechat_cookie`: Cookie from PC client session
+   - Used for: Engagement metrics, historical data
+
+Both require **manual extraction** using browser Developer Tools or packet capture tools.
+
+### Core Classes
+
+- **`PublicAccountsWeb`**: Web-based scraping, article URL collection
+- **`ArticlesInfo`**: Engagement metrics (reads, likes, comments)
+- **`Url2Html`**: Offline HTML download with image preservation
+- **`get_history_urls()`**: Bulk URL collection via historical access
+
+### Rate Limiting
+
+⚠️ **Critical**: Always implement rate limiting to avoid being blocked.
+
+**Recommended delays:**
+- Between articles: 5-10 seconds
+- Between pages: 10-15 seconds
+- Between batches: 30-60 seconds
+
+```python
+import time
+import random
+
+time.sleep(random.uniform(5, 10))
+```
+
+### Common Parameters
+
+- **`nickname`**: Public account display name
+- **`biz`**: Business account identifier (found in article URLs)
+- **`uin`**: User ID from WeChat login
+- **`key`**: Session key (requires periodic renewal)
+- **`begin`/`count`**: Pagination parameters (strings, not integers)
+
+## Reference Documentation
+
+### Getting Started
+- [Installation & Quick Start](references/getting_started.md) - Setup guide and first steps
+- [Authentication Guide](references/authentication.md) - How to obtain credentials
+
+### API Documentation
+- [Complete API Reference](references/api.md) - All classes, methods, and parameters
+- [Usage Examples](references/examples.md) - Working code examples
+
+### Index
+- [Reference Index](references/index.md) - Complete documentation overview
+
+## Important Constraints
+
+1. **No Automated Login**: Credentials must be manually extracted
+2. **Manual Configuration**: Parameters must be updated per account
+3. **Rate Limiting Required**: Essential to prevent blocking
+4. **Token Expiration**: Credentials expire (hours to days)
+5. **Learning Tool**: Not production-ready without significant modification
+
+## Code Examples by Use Case
+
+### Research & Analysis
+- Track article performance over time
+- Compare engagement across accounts
+- Analyze content trends
+- Export data for visualization
+
+### Content Archiving
+- Download articles as offline HTML
+- Preserve images locally
+- Create searchable archives
+- Backup important content
+
+### Engagement Tracking
+- Monitor read counts in real-time
+- Track like growth
+- Analyze comment sentiment
+- Identify viral content
+
+## Best Practices
+
+1. **Always implement rate limiting** (5-10 seconds between requests)
+2. **Handle authentication expiration** (re-extract credentials when needed)
+3. **Use try-except blocks** for robust error handling
+4. **Log all operations** for debugging
+5. **Respect WeChat's terms of service**
+6. **Store credentials securely** (never commit to version control)
+7. **Test with small batches first** before bulk operations
+
+## Troubleshooting
+
+### Authentication Errors
+- Extract fresh credentials (tokens expire quickly)
+- Verify all parameters are correct
+- Check network connectivity
+
+### Rate Limiting / Blocks
+- Increase delay between requests
+- Use random intervals instead of fixed delays
+- Take longer breaks between batches
+
+### Empty Responses
+- Verify URL patterns are correct
+- Check that account is public and accessible
+- Ensure credentials haven't expired
+
+## Example: Complete Scraper Script
+
+```python
+import time
+import random
+import json
+from datetime import datetime
+from wechatarticles import PublicAccountsWeb, ArticlesInfo
+
+# Configure
+official_cookie = "your_official_cookie"
+token = "your_token"
+appmsg_token = "your_appmsg_token"
+wechat_cookie = "your_wechat_cookie"
+
+nickname = "TechBlog"
+biz = "MzAxMjQ..."
+
+# Initialize
+paw = PublicAccountsWeb(cookie=official_cookie, token=token)
+ai = ArticlesInfo(appmsg_token, wechat_cookie)
+
+# Get total count
+total = paw.articles_nums(nickname)
+print(f"Total articles: {total}")
+
+# Fetch and analyze articles
+articles = paw.get_urls(nickname, biz=biz, begin="0", count="10")
+results = []
+
+for i, article in enumerate(articles, 1):
+    url = article['url']
+    print(f"Processing {i}/{len(articles)}: {article['title']}")
+
+    try:
+        reads, likes, old_likes = ai.read_like_nums(url)
+        comments = ai.comments(url)
+
+        results.append({
+            'title': article['title'],
+            'url': url,
+            'reads': reads,
+            'likes': likes,
+            'comments': len(comments) if comments else 0,
+            'timestamp': datetime.now().isoformat()
+        })
+
+        time.sleep(random.uniform(5, 10))
+    except Exception as e:
+        print(f"Error: {e}")
+
+# Save results
+with open('results.json', 'w', encoding='utf-8') as f:
+    json.dump(results, f, ensure_ascii=False, indent=2)
+
+print(f"Saved {len(results)} articles to results.json")
+```
+
+## Additional Resources
+
+- **GitHub Repository**: https://github.com/wnma3mz/wechat_articles_spider
+- **PyPI Package**: https://pypi.org/project/wechatarticles/
+- **Python Version**: 3.6.2+ required
+
+## Navigation Guide
+
+**For Beginners:**
+1. Start with [Getting Started](references/getting_started.md)
+2. Follow [Authentication Guide](references/authentication.md) to get credentials
+3. Try the Quick Reference examples above
+
+**For API Reference:**
+1. See [API Documentation](references/api.md) for all methods
+2. Review [Usage Examples](references/examples.md) for patterns
+
+**For Advanced Usage:**
+1. Study complete examples in [examples.md](references/examples.md)
+2. Build custom workflows using API patterns
+3. Implement robust error handling and retry logic
+
+---
+
+**Note**: This library is designed for learning and research purposes. Always respect WeChat's terms of service and implement appropriate rate limiting when scraping content.
