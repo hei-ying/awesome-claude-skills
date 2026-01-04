@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import requests
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 import base64
@@ -29,21 +30,40 @@ class FeishuAPIClient:
     def __init__(self):
         self.app_id = os.getenv("FEISHU_APP_ID")
         self.app_secret = os.getenv("FEISHU_APP_SECRET")
+        self.folder_token = os.getenv("FEISHU_FOLDER_TOKEN")  # 新增：文件夹 Token
 
-        if not self.app_id or not self.app_secret:
-            print("❌ 错误：请设置环境变量 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
-            print("\n设置方法：")
-            print("Windows PowerShell:")
-            print('  $env:FEISHU_APP_ID="your_app_id"')
-            print('  $env:FEISHU_APP_SECRET="your_app_secret"')
-            print("\nLinux/Mac:")
-            print('  export FEISHU_APP_ID="your_app_id"')
-            print('  export FEISHU_APP_SECRET="your_app_secret"')
-            sys.exit(1)
+        # 强制检查环境变量
+        self._check_env_vars()
 
         self.tenant_access_token = None
         self.token_expires_at = 0
         self.api_base = "https://open.feishu.cn/open-apis"
+
+    def _check_env_vars(self):
+        """检查并提醒配置环境变量"""
+        missing = []
+        if not self.app_id:
+            missing.append("FEISHU_APP_ID")
+        if not self.app_secret:
+            missing.append("FEISHU_APP_SECRET")
+        if not self.folder_token:
+            missing.append("FEISHU_FOLDER_TOKEN")
+
+        if missing:
+            print(f"❌ 错误：缺少必要的环境变量: {', '.join(missing)}")
+            print("\n请按以下步骤配置：")
+            print("\n1. 获取授权文件夹的 Token")
+            print("   - 在飞书中打开目标文件夹")
+            print("   - 从 URL 中复制 folder_token（folder/ 后面的一串 ID）")
+            print("   - URL 格式: https://feishu.cn/drive/folder/{folder_token}")
+            print("\n2. 设置环境变量（Windows PowerShell 示例）：")
+            for var in missing:
+                print(f'   $env:{var}="your_value_here"')
+            print("\n  Linux/Mac 示例：")
+            for var in missing:
+                print(f'   export {var}="your_value_here"')
+            print("\n⚠️  只有配置了 FEISHU_FOLDER_TOKEN，同步后的文档才具有编辑权限。")
+            sys.exit(1)
 
     def get_tenant_access_token(self) -> str:
         """获取 tenant_access_token"""
@@ -155,7 +175,7 @@ class FeishuAPIClient:
             raise
 
     def create_document(self, title: str, blocks: List[Dict] = None) -> Dict:
-        """创建新文档
+        """在指定文件夹中创建新文档并写入初始内容
 
         Args:
             title: 文档标题
@@ -166,52 +186,34 @@ class FeishuAPIClient:
         """
         url = "docx/v1/documents"
 
-        # 先创建空文档
+        # 关键修改：加入 folder_token，实现权限继承
         payload = {
-            "title": title
+            "title": title,
+            "folder_token": self.folder_token
         }
 
+        # 1. 创建空文档获取 ID
         result = self._request("POST", url, json=payload)
-
         document_id = result.get("document", {}).get("document_id")
-        revision_id = result.get("document", {}).get("revision_id")
 
-        print(f"    [DEBUG] 创建空文档成功: {document_id}")
+        print(f"    [DEBUG] 成功在文件夹中创建文档 ID: {document_id}")
+        print(f"    [DEBUG] 文件夹 Token: {self.folder_token}")
 
-        # 如果有 blocks，使用更新接口逐个添加
+        # 2. 调用 append_blocks 写入内容
         if blocks and document_id:
-            print(f"    [DEBUG] 准备添加 {len(blocks)} 个 blocks...")
-
-            # 使用 block/create 接口逐个创建
-            for i, block in enumerate(blocks):
-                try:
-                    block_url = f"docx/v1/documents/{document_id}/blocks/{block.get('block_type')}/create"
-
-                    block_payload = {
-                        "block_type": block.get("block_type"),
-                        **{k: v for k, v in block.items() if k != 'block_type'}
-                    }
-
-                    block_result = self._request("POST", block_url, json=block_payload)
-
-                    if i % 10 == 0:
-                        print(f"    [DEBUG] 已添加 {i+1}/{len(blocks)} blocks...")
-
-                except Exception as e:
-                    print(f"    [DEBUG] 添加 block {i+1} 失败: {e}")
-                    # 继续添加下一个
+            print(f"    [DEBUG] 正在写入初始内容...")
+            self.append_blocks(document_id, blocks)
 
         return {
-            "document_id": document_id,
-            "revision_id": revision_id
+            "document_id": document_id
         }
 
     def append_blocks(self, document_id: str, blocks: List[Dict],
                      block_id: str = None) -> Dict:
-        """追加内容块到文档
+        """追加内容块到文档（使用最稳定的 children 接口）
 
-        根据飞书 API 文档，使用 batch_update 接口
-        https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/batch_update
+        飞书 Docx API 官方推荐接口：
+        https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/children/create
 
         Args:
             document_id: 文档 ID
@@ -221,30 +223,31 @@ class FeishuAPIClient:
         Returns:
             追加结果
         """
-        if len(blocks) > 50:
-            raise ValueError("单次最多追加 50 个 block")
+        if not blocks:
+            return {}
 
-        # 使用 batch_update 接口
-        url = f"docx/v1/documents/{document_id}/blocks/batch_update"
+        # 如果 block_id 为空，说明是向文档根节点追加，此时 parent_id 就是 document_id
+        parent_id = block_id or document_id
+        url = f"docx/v1/documents/{document_id}/blocks/{parent_id}/children"
 
-        # 构建请求
-        requests_list = []
-        for i, block in enumerate(blocks):
-            block_request = {
-                "create_block": {
-                    "block_type": block.get("block_type"),
-                    **block  # 展开其他字段
-                },
-                "parent_id": block_id or "0"  # 0 表示根节点
+        # 飞书限制单次最多 50 个 block
+        batch_size = 50
+        for i in range(0, len(blocks), batch_size):
+            batch = blocks[i:i + batch_size]
+
+            # 严格遵守飞书 Docx v1 Schema：{"children": [...]}
+            payload = {
+                "children": batch
             }
-            requests_list.append(block_request)
 
-        payload = {
-            "requests": requests_list
-        }
+            try:
+                self._request("POST", url, json=payload)
+                print(f"    [DEBUG] 已同步 {i + len(batch)}/{len(blocks)} 个区块")
+            except FeishuAPIError as e:
+                print(f"    [ERROR] 写入区块失败: {e.msg}")
+                raise
 
-        result = self._request("POST", url, json=payload)
-        return result
+        return {"status": "success"}
 
     def upload_image(self, image_path: str, parent_type: str = "docx",
                     parent_node: str = None) -> str:
@@ -303,6 +306,87 @@ class FeishuAPIClient:
 
 class MarkdownParser:
     """Markdown 解析器，将 Markdown 转换为飞书 Block 格式"""
+
+    # 根据官方提供的最新映射表完全重写
+    FEISHU_LANG_MAP = {
+        "plaintext": 1, "text": 1, "plain": 1,
+        "abap": 2,
+        "ada": 3,
+        "apache": 4,
+        "apex": 5,
+        "assembly": 6, "asm": 6,
+        "bash": 7, "sh": 7, "shell": 60,  # 官方 7 是 Bash, 60 是 Shell
+        "csharp": 8, "c#": 8, "cs": 8,
+        "cpp": 9, "c++": 9,
+        "c": 10,
+        "cobol": 11,
+        "css": 12, "scss": 55, "less": 12,  # CSS 相关
+        "coffeescript": 13, "coffee": 13,
+        "d": 14,
+        "dart": 15,
+        "delphi": 16,
+        "django": 17,
+        "dockerfile": 18, "docker": 18,
+        "erlang": 19,
+        "fortran": 20,
+        "foxpro": 21,
+        "go": 22, "golang": 22,
+        "groovy": 23,
+        "html": 24,
+        "htmlbars": 25,
+        "http": 26,
+        "haskell": 27,
+        "json": 28,  # ✅ 关键修复：从 34 改为 28
+        "java": 29,
+        "javascript": 30, "js": 30,
+        "julia": 31,
+        "kotlin": 32,
+        "latex": 33,
+        "lisp": 34,
+        "logo": 35,
+        "lua": 36,
+        "matlab": 37,
+        "makefile": 38, "make": 38,
+        "markdown": 39, "md": 39,
+        "nginx": 40,
+        "objectivec": 41, "objc": 41, "objective-c": 41,
+        "openedgeabl": 42,
+        "php": 43,
+        "perl": 44,
+        "postscript": 45,
+        "powershell": 46, "ps1": 46, "pwsh": 46,
+        "prolog": 47,
+        "protobuf": 48, "proto": 48,
+        "python": 49, "py": 49,  # ✅ 关键修复：从 13 改为 49
+        "r": 50,
+        "rpg": 51,
+        "ruby": 52,
+        "rust": 53,  # ✅ 关键修复：从 16 改为 53
+        "sas": 54,
+        "scala": 57,
+        "scheme": 58,
+        "scratch": 59,
+        "swift": 61,
+        "thrift": 62,
+        "typescript": 63, "ts": 63,  # ✅ 关键修复：从 23 改为 63
+        "vbscript": 64,
+        "visualbasic": 65, "vb": 65,
+        "xml": 66,
+        "yaml": 67, "yml": 67,  # ✅ 关键修复：从 35 改为 67
+        "cmake": 68,
+        "diff": 69,
+        "gherkin": 70,
+        "graphql": 71,
+        "opengl": 72,
+        "properties": 73, "ini": 73,
+        "solidity": 74,
+        "toml": 75,
+        "mermaid": 32,  # Mermaid - 文本绘图（与 Kotlin 共享 ID 32）
+        "sql": 56,  # ✅ 关键修复：从 28 改为 56
+        "tsql": 76,  # T-SQL
+        "plsql": 77,  # PL/SQL
+        "mysql": 78,  # MySQL
+    }
 
     def __init__(self):
         self.image_tokens = {}  # 存储图片路径到 file_token 的映射
@@ -405,66 +489,56 @@ class MarkdownParser:
             }
 
     def _parse_code_block(self, lines: List[str], start_line: int) -> tuple:
-        """解析代码块 - 使用正确的 block_type 14 和 code 字段
+        """
+        深度优化代码块解析：
+
+        1. 使用正则精准提取语言标签
+        2. 增加内容自动探测逻辑（JSON 对象/数组）
+        3. 增强调试输出
 
         Returns:
             (block_dict, end_line_index)
         """
-        # 提取语言标识符
-        first_line = lines[start_line]
-        language = first_line[3:].strip() or "text"
+        first_line = lines[start_line].strip()
+
+        # 使用正则提取 ``` 之后的第一个连续单词
+        # 例如: ```json {1-5} -> json
+        #      ```sql 数据查询 -> sql
+        match = re.search(r'^```\s*([a-zA-Z0-9+#-]+)', first_line)
+        lang_str = match.group(1).lower() if match else ""
 
         # 收集代码内容
         code_lines = []
         i = start_line + 1
-        while i < len(lines) and not lines[i].startswith('```'):
+        while i < len(lines) and not lines[i].strip().startswith('```'):
             code_lines.append(lines[i])
             i += 1
 
         code_text = '\n'.join(code_lines)
 
-        # 语言映射到飞书的 language ID
-        # 注意：ISV 组件 (block_type 32) 不支持通过 API 创建
-        # 因此 Mermaid 仍使用 block_type 14，飞书前端会自动识别渲染
-        lang_map = {
-            "python": 13,
-            "javascript": 22,
-            "js": 22,
-            "typescript": 23,
-            "java": 4,
-            "go": 15,
-            "rust": 16,
-            "c++": 11,
-            "cpp": 11,
-            "c": 10,
-            "c#": 12,
-            "php": 20,
-            "ruby": 21,
-            "swift": 24,
-            "kotlin": 25,
-            "sql": 28,
-            "html": 31,
-            "css": 32,
-            "json": 34,
-            "yaml": 35,
-            "yml": 35,
-            "xml": 36,
-            "markdown": 37,
-            "bash": 26,
-            "shell": 26,
-            "sh": 26,
-            "powershell": 27,
-            "dockerfile": 29,
-            "mermaid": 32,  # Mermaid - 使用 code block，飞书前端自动识别
-        }
+        # 获取初步的 language ID
+        lang_id = self.FEISHU_LANG_MAP.get(lang_str, 1)
 
-        lang_id = lang_map.get(language.lower(), 1)  # 默认 Plain Text
+        # 自动探测逻辑：如果没标语言或识别为 PlainText，但内容看起来像 JSON
+        if not lang_str or lang_id == 1:
+            stripped_content = code_text.strip()
+            # 探测 JSON 对象
+            if stripped_content.startswith('{') and stripped_content.endswith('}'):
+                lang_str = "json"
+                lang_id = 28  # ✅ 官方 JSON ID 是 28
+            # 探测 JSON 数组
+            elif stripped_content.startswith('[') and stripped_content.endswith(']'):
+                lang_str = "json"
+                lang_id = 28  # ✅ 官方 JSON ID 是 28
+
+        # 调试输出（始终显示，方便验证识别是否正确）
+        print(f"    [DEBUG] 代码块识别: 标签='{lang_str}', 语言ID={lang_id}")
 
         return {
             "block_type": 14,  # code
             "code": {
                 "style": {
-                    "language": lang_id
+                    "language": lang_id  # 关键：传入正确的整数 ID
                 },
                 "elements": [{
                     "text_run": {
@@ -750,7 +824,7 @@ class FeishuDocWriter:
 
         # 6. 分批写入
         print(f"📝 正在写入内容 (共 {len(blocks)} 个 blocks)...")
-        self._write_in_batches(document_id, title, blocks, operation)
+        document_id = self._write_in_batches(document_id, title, blocks, operation)
 
         print(f"\n✅ 同步完成！")
         print(f"文档标题: {title}")
